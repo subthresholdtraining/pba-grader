@@ -9,6 +9,7 @@ import pandas as pd
 import io
 import requests
 from datetime import datetime
+from anthropic import Anthropic
 from grading_logic import grade_submission, determine_overall_grade
 from document_generator import create_grading_document
 
@@ -18,6 +19,103 @@ st.set_page_config(
     page_icon="🐕",
     layout="wide"
 )
+
+# Get API key from secrets
+api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+
+
+def translate_feedback(results: dict, target_language: str) -> dict:
+    """Translate all feedback in results to the target language."""
+    if not api_key:
+        return results
+
+    # Build the text to translate
+    feedback_texts = []
+    for q_id, result in results.items():
+        feedback_texts.append(f"[{q_id}]: {result.feedback}")
+
+    combined_text = "\n".join(feedback_texts)
+
+    if target_language == "French":
+        language_instruction = """You are translating dog training assessment feedback from English to French.
+
+FRENCH DICTIONARY - Use these specific terms:
+- Behavior consultant = consultant(e) en comportement canin
+- Separation anxiety = anxiété de séparation
+- Dog trainer = Consultant(e) en comportement canin
+- Dog training = Éducation canine
+- Target duration = durée cible
+- Warmup steps = étapes d'échauffement
+
+TRANSLATION RULES:
+1. Do NOT literally translate idioms - use the French equivalent instead
+2. Keep these English expressions as-is: "Door is a Bore", "DIAB", "Car is a Bore", "CIAB", "Key is a Bore", "KIAB", "FOMO", "push-drop"
+3. Use modern, natural French - avoid antiquated expressions
+4. Maintain the warm, professional tone
+5. Keep the educational context of dog training
+6. Preserve the [q1], [q2], etc. markers exactly as-is
+
+Translate each feedback line, keeping the [qX]: format:"""
+
+    elif target_language == "Dutch":
+        language_instruction = """You are translating dog training assessment feedback from English to Dutch.
+
+DUTCH TRANSLATION RULES:
+1. Keep these English expressions as-is: "Door is a Bore", "DIAB", "Car is a Bore", "CIAB", "Key is a Bore", "KIAB", "FOMO", "push-drop"
+2. Use "je/jij" (informal) not "u" (formal) - keep it warm and collegial
+3. Avoid literal translations of English idioms - use natural Dutch equivalents
+4. Watch word order in subordinate clauses (verb goes to end)
+5. Use natural Dutch compound words where appropriate
+6. Avoid anglicisms where good Dutch alternatives exist
+7. Keep the warm, professional tone
+8. Use modern Dutch - avoid stiff or formal phrasing
+9. "Separation anxiety" = "verlatingsangst" or "scheidingsangst"
+10. "Target duration" = "doelduur"
+11. Preserve the [q1], [q2], etc. markers exactly as-is
+
+Translate each feedback line, keeping the [qX]: format:"""
+    else:
+        return results
+
+    try:
+        client = Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4000,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"{language_instruction}\n\n{combined_text}"
+                }
+            ]
+        )
+
+        translated_text = message.content[0].text
+
+        # Parse the translated text back into results
+        import re
+        from grading_logic import GradeResult
+
+        translated_results = {}
+        for q_id, result in results.items():
+            # Find the translated feedback for this question
+            pattern = rf'\[{q_id}\]:\s*(.+?)(?=\n\[q|$)'
+            match = re.search(pattern, translated_text, re.DOTALL)
+            if match:
+                translated_feedback = match.group(1).strip()
+                translated_results[q_id] = GradeResult(
+                    is_correct=result.is_correct,
+                    feedback=translated_feedback,
+                    calculation=result.calculation
+                )
+            else:
+                translated_results[q_id] = result
+
+        return translated_results
+    except Exception as e:
+        st.error(f"Translation error: {e}")
+        return results
+
 
 # Default Google Sheet URL
 DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1HOY8Mzsv2pT9XQX8EwRri3L3EEKNU_cVR9PKRaYwWX0/edit?usp=sharing"
@@ -274,6 +372,30 @@ if st.session_state.get('sheet_loaded', False) and 'sheet_data' in st.session_st
 
                             st.markdown(result.feedback)
                             st.markdown("---")
+
+                # Translation section
+                st.markdown("---")
+                st.subheader("🌍 Translate Feedback")
+                st.markdown("*Translate all feedback to French or Dutch:*")
+
+                col_lang, col_btn = st.columns([1, 2])
+                with col_lang:
+                    target_language = st.selectbox("Language", ["French", "Dutch"], key="pba_lang", label_visibility="collapsed")
+                with col_btn:
+                    translate_clicked = st.button(f"🔄 Translate to {target_language}", use_container_width=True)
+
+                if translate_clicked:
+                    if not api_key:
+                        st.error("API key not configured. Please add ANTHROPIC_API_KEY to secrets.")
+                    else:
+                        with st.spinner(f"Translating feedback to {target_language}..."):
+                            translated_results = translate_feedback(results, target_language)
+                            st.session_state['grading_results'] = translated_results
+                            # Also update resubmit questions if needed
+                            overall_grade, resubmit_questions = determine_overall_grade(translated_results)
+                            st.session_state['resubmit_questions'] = resubmit_questions
+                            st.success(f"Translated to {target_language}!")
+                            st.rerun()
 
                 # Generate document
                 st.subheader("📄 Download Feedback Document")
