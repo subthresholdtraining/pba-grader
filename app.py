@@ -226,15 +226,33 @@ def extract_sheet_id(url: str) -> str:
         if end == -1:
             end = url.find('?', start)
         if end == -1:
+            end = url.find('#', start)
+        if end == -1:
             end = len(url)
         return url[start:end]
     return url
 
 
+def extract_gid(url: str) -> str:
+    """Extract the gid (sheet tab ID) from URL if present."""
+    import re
+    # Look for gid= in URL (can be after ? or #)
+    match = re.search(r'gid=(\d+)', url)
+    if match:
+        return match.group(1)
+    return None
+
+
 def load_sheet_data(sheet_url: str) -> pd.DataFrame:
-    """Load data from a Google Sheet."""
+    """Load data from a Google Sheet, handling specific tabs via gid."""
     sheet_id = extract_sheet_id(sheet_url)
-    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+    gid = extract_gid(sheet_url)
+
+    # Build export URL - include gid if present to load specific tab
+    if gid:
+        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    else:
+        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
 
     try:
         response = requests.get(csv_url, timeout=30)
