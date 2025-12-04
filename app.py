@@ -151,34 +151,33 @@ COLUMN_MAPPING_ENGLISH = {
     'q17': 47,  # QUESTION 17: DIAB warmups
 }
 
-# French form: 47 columns, missing "Assessed by" and "Correct or incorrect?" columns
-# Has empty col 5 and "Skip to end?" in col 6 (to drop)
-# French is offset by +1 for cols 5-6 extras, then -4 for missing "Correct or incorrect?" columns after Maisie
+# French form: 47 columns
+# Verified from actual CSV export - column positions differ from English
 COLUMN_MAPPING_FRENCH = {
     'submission_date': 0,
     'first_name': 1,
     'last_name': 2,
     'email': 3,
-    'q1': 11,   # QUESTION 1: Maisie Plan 1 (En 12 - 1 for missing "Assessed by")
-    'q2': 13,   # QUESTION 2: Maisie Plan 2 (En 15 - 1 "Assessed by" - 1 "Correct?")
-    'q3': 15,   # QUESTION 3: Maisie Plan 3 (En 18 - 1 - 2)
-    'q4': 17,   # QUESTION 4: Maisie after struggle (En 21 - 1 - 3)
-    'q5': 18,   # Question 5: Minna Plan 1 (En 23 - 1 - 4)
-    'q6': 20,   # Question 6: Minna Plan 2
-    'q7': 22,   # QUESTION 7: Minna Plan 3
-    'q8': 24,   # QUESTION 8: Minna increase
-    'q9': 25,   # QUESTION 9: Oliver Plan 1
-    'q10': 27,  # QUESTION 10: Oliver Plan 2
-    'q11': 29,  # QUESTION 11: Oliver Plan 3
-    'q12': 31,  # QUESTION 12: Oliver keys
-    'q13': 32,  # QUESTION 13: Bella Plan 1
-    'q13b': 33, # QUESTION 13B: Bella warmups
-    'q14': 35,  # QUESTION 14: Bella Plan 2
-    'q14b': 36, # QUESTION 14B: Bella warmups 2
-    'q15': 38,  # QUESTION 15: Bella Plan 3
-    'q15b': 39, # QUESTION 15B: Bella warmups 3
-    'q16': 41,  # QUESTION 16: Bella car
-    'q17': 42,  # QUESTION 17: DIAB warmups
+    'q1': 13,   # QUESTION 1: Maisie Plan 1
+    'q2': 15,   # QUESTION 2: Maisie Plan 2
+    'q3': 17,   # QUESTION 3: Maisie Plan 3
+    'q4': 19,   # QUESTION 4: Maisie after struggle
+    'q5': 20,   # Question 5: Minna Plan 1
+    'q6': 22,   # Question 6: Minna Plan 2
+    'q7': 24,   # QUESTION 7: Minna Plan 3
+    'q8': 26,   # QUESTION 8: Minna increase
+    'q9': 27,   # QUESTION 9: Oliver Plan 1
+    'q10': 29,  # QUESTION 10: Oliver Plan 2
+    'q11': 31,  # QUESTION 11: Oliver Plan 3
+    'q12': 33,  # QUESTION 12: Oliver keys
+    'q13': 34,  # QUESTION 13: Bella Plan 1
+    'q13b': 35, # QUESTION 13B: Bella warmups
+    'q14': 37,  # QUESTION 14: Bella Plan 2
+    'q14b': 38, # QUESTION 14B: Bella warmups 2
+    'q15': 40,  # QUESTION 15: Bella Plan 3
+    'q15b': 41, # QUESTION 15B: Bella warmups 3
+    'q16': 43,  # QUESTION 16: Bella car
+    'q17': 44,  # QUESTION 17: DIAB warmups
 }
 
 # Default to English mapping (will be auto-detected)
