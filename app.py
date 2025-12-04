@@ -121,8 +121,10 @@ Translate each feedback line, keeping the [qX]: format:"""
 DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1HOY8Mzsv2pT9XQX8EwRri3L3EEKNU_cVR9PKRaYwWX0/edit?usp=sharing"
 
 # Column mapping from Google Sheet to our question IDs
-# These are the column indices in the spreadsheet
-COLUMN_MAPPING = {
+# These are the column indices in the spreadsheet (0-indexed)
+
+# English form: 50 columns, has "Assessed by" in col 5, and "Correct or incorrect?" columns after Maisie questions
+COLUMN_MAPPING_ENGLISH = {
     'submission_date': 0,
     'first_name': 1,
     'last_name': 2,
@@ -148,6 +150,72 @@ COLUMN_MAPPING = {
     'q16': 46,  # QUESTION 16: Bella car
     'q17': 47,  # QUESTION 17: DIAB warmups
 }
+
+# French form: 47 columns, missing "Assessed by" and "Correct or incorrect?" columns
+# Has empty col 5 and "Skip to end?" in col 6 (to drop)
+# French is offset by +1 for cols 5-6 extras, then -4 for missing "Correct or incorrect?" columns after Maisie
+COLUMN_MAPPING_FRENCH = {
+    'submission_date': 0,
+    'first_name': 1,
+    'last_name': 2,
+    'email': 3,
+    'q1': 11,   # QUESTION 1: Maisie Plan 1 (En 12 - 1 for missing "Assessed by")
+    'q2': 13,   # QUESTION 2: Maisie Plan 2 (En 15 - 1 "Assessed by" - 1 "Correct?")
+    'q3': 15,   # QUESTION 3: Maisie Plan 3 (En 18 - 1 - 2)
+    'q4': 17,   # QUESTION 4: Maisie after struggle (En 21 - 1 - 3)
+    'q5': 18,   # Question 5: Minna Plan 1 (En 23 - 1 - 4)
+    'q6': 20,   # Question 6: Minna Plan 2
+    'q7': 22,   # QUESTION 7: Minna Plan 3
+    'q8': 24,   # QUESTION 8: Minna increase
+    'q9': 25,   # QUESTION 9: Oliver Plan 1
+    'q10': 27,  # QUESTION 10: Oliver Plan 2
+    'q11': 29,  # QUESTION 11: Oliver Plan 3
+    'q12': 31,  # QUESTION 12: Oliver keys
+    'q13': 32,  # QUESTION 13: Bella Plan 1
+    'q13b': 33, # QUESTION 13B: Bella warmups
+    'q14': 35,  # QUESTION 14: Bella Plan 2
+    'q14b': 36, # QUESTION 14B: Bella warmups 2
+    'q15': 38,  # QUESTION 15: Bella Plan 3
+    'q15b': 39, # QUESTION 15B: Bella warmups 3
+    'q16': 41,  # QUESTION 16: Bella car
+    'q17': 42,  # QUESTION 17: DIAB warmups
+}
+
+# Default to English mapping (will be auto-detected)
+COLUMN_MAPPING = COLUMN_MAPPING_ENGLISH
+
+
+def detect_form_language(df: pd.DataFrame) -> str:
+    """
+    Detect if the spreadsheet is English or French based on column structure.
+    French form has empty col 5 header or "Skip to end?" in col 6.
+    English form has "Assessed by" in col 5.
+    """
+    columns = df.columns.tolist()
+
+    # Check number of columns
+    if len(columns) <= 47:
+        return "French"
+
+    # Check for "Assessed by" in column 5 (English) or empty/Skip to end (French)
+    if len(columns) > 5:
+        col5_header = str(columns[4]).strip().lower() if pd.notna(columns[4]) else ""
+        col6_header = str(columns[5]).strip().lower() if len(columns) > 6 and pd.notna(columns[5]) else ""
+
+        if "assessed" in col5_header:
+            return "English"
+        if col5_header == "" or "skip" in col6_header:
+            return "French"
+
+    # Default to English if can't determine
+    return "English"
+
+
+def get_column_mapping(form_language: str) -> dict:
+    """Get the appropriate column mapping for the form language."""
+    if form_language == "French":
+        return COLUMN_MAPPING_FRENCH
+    return COLUMN_MAPPING_ENGLISH
 
 
 def extract_sheet_id(url: str) -> str:
@@ -178,12 +246,12 @@ def load_sheet_data(sheet_url: str) -> pd.DataFrame:
         return None
 
 
-def get_student_answers(row, df) -> dict:
+def get_student_answers(row, df, column_mapping: dict) -> dict:
     """Extract answers from a DataFrame row using column indices."""
     answers = {}
     columns = df.columns.tolist()
 
-    for q_id, col_idx in COLUMN_MAPPING.items():
+    for q_id, col_idx in column_mapping.items():
         if q_id in ['submission_date', 'first_name', 'last_name', 'email']:
             continue
         if col_idx < len(columns):
@@ -227,13 +295,22 @@ if st.button("📥 Load Submissions", type="primary"):
     with st.spinner("Loading submissions from Google Sheets..."):
         df = load_sheet_data(sheet_url)
         if df is not None:
+            # Auto-detect form language
+            form_language = detect_form_language(df)
             st.session_state['sheet_data'] = df
             st.session_state['sheet_loaded'] = True
-            st.success(f"Loaded {len(df)} submissions!")
+            st.session_state['form_language'] = form_language
+            st.session_state['column_mapping'] = get_column_mapping(form_language)
+            st.success(f"Loaded {len(df)} submissions! (Detected: {form_language} form)")
 
 # If data is loaded, show student selector
 if st.session_state.get('sheet_loaded', False) and 'sheet_data' in st.session_state:
     df = st.session_state['sheet_data']
+    column_mapping = st.session_state.get('column_mapping', COLUMN_MAPPING_ENGLISH)
+    form_language = st.session_state.get('form_language', 'English')
+
+    # Show detected form type
+    st.info(f"📋 Form type: **{form_language}**")
 
     st.markdown("---")
     st.header("👤 Select Student")
@@ -242,9 +319,9 @@ if st.session_state.get('sheet_loaded', False) and 'sheet_data' in st.session_st
     columns = df.columns.tolist()
     students = []
     for idx, row in df.iterrows():
-        first_name = row.iloc[COLUMN_MAPPING['first_name']] if COLUMN_MAPPING['first_name'] < len(columns) else ""
-        last_name = row.iloc[COLUMN_MAPPING['last_name']] if COLUMN_MAPPING['last_name'] < len(columns) else ""
-        sub_date = row.iloc[COLUMN_MAPPING['submission_date']] if COLUMN_MAPPING['submission_date'] < len(columns) else ""
+        first_name = row.iloc[column_mapping['first_name']] if column_mapping['first_name'] < len(columns) else ""
+        last_name = row.iloc[column_mapping['last_name']] if column_mapping['last_name'] < len(columns) else ""
+        sub_date = row.iloc[column_mapping['submission_date']] if column_mapping['submission_date'] < len(columns) else ""
 
         if pd.notna(first_name) and pd.notna(last_name):
             display_name = f"{first_name} {last_name}"
@@ -265,11 +342,11 @@ if st.session_state.get('sheet_loaded', False) and 'sheet_data' in st.session_st
             selected_row = df.iloc[row_idx]
 
             # Get student info
-            student_name = f"{selected_row.iloc[COLUMN_MAPPING['first_name']]} {selected_row.iloc[COLUMN_MAPPING['last_name']]}"
-            submission_date = str(selected_row.iloc[COLUMN_MAPPING['submission_date']])
+            student_name = f"{selected_row.iloc[column_mapping['first_name']]} {selected_row.iloc[column_mapping['last_name']]}"
+            submission_date = str(selected_row.iloc[column_mapping['submission_date']])
 
             # Get answers
-            answers = get_student_answers(selected_row, df)
+            answers = get_student_answers(selected_row, df, column_mapping)
 
             # Display answers for review
             st.markdown("---")
