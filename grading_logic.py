@@ -24,6 +24,8 @@ def parse_duration(duration_str: str) -> Optional[float]:
     - "2:45", "2'45", "2 minutes 45 seconds"
     - "5:30", "5 minutes 30 seconds"
     - "DOOR", "Door", "door" -> returns None (special case)
+    - French formats: "0,13" (= 0:13 = 13 sec), "2,20" (= 2:20 = 2min 20sec)
+    - French formats: "1minutes 20 secondes", "2 minutes 30 secondes"
     """
     if duration_str is None:
         return None
@@ -34,17 +36,59 @@ def parse_duration(duration_str: str) -> Optional[float]:
     if 'door' in duration_str or 'diab' in duration_str:
         return None  # Special marker for DIAB
 
-    # Check for "X minutes" or "X minute" without seconds - convert to total seconds
-    mins_only_match = re.match(r'^(\d+(?:\.\d+)?)\s*(?:minutes?|mins?)$', duration_str)
-    if mins_only_match:
-        return float(mins_only_match.group(1)) * 60
+    # Handle French format: "Xminutes Y secondes" or "X minutes Y secondes" (with or without spaces)
+    # Must check this BEFORE other processing
+    french_full_match = re.match(r'^(\d+)\s*minutes?\s*(\d+)\s*secondes?$', duration_str)
+    if french_full_match:
+        minutes = int(french_full_match.group(1))
+        seconds = int(french_full_match.group(2))
+        return minutes * 60 + seconds
 
-    # Remove common words
+    # Handle English format: "X minutes Y seconds" (with or without spaces)
+    eng_full_match = re.match(r'^(\d+)\s*minutes?\s*(\d+)\s*seconds?$', duration_str)
+    if eng_full_match:
+        minutes = int(eng_full_match.group(1))
+        seconds = int(eng_full_match.group(2))
+        return minutes * 60 + seconds
+
+    # Handle French decimal format: "0,13" or "2,20" -> treat comma as time separator (min:sec)
+    # This handles cases like "0,13" meaning 13 seconds, "2,20" meaning 2:20
+    french_time_match = re.match(r'^(\d+),(\d{1,2})$', duration_str)
+    if french_time_match:
+        minutes = int(french_time_match.group(1))
+        seconds = int(french_time_match.group(2))
+        return minutes * 60 + seconds
+
+    # Handle French shorthand: "3mn2" = 3 min 2 sec, "1m06" = 1 min 6 sec
+    shorthand_match = re.match(r'^(\d+)\s*(?:mn|m)\s*(\d+)$', duration_str)
+    if shorthand_match:
+        minutes = int(shorthand_match.group(1))
+        seconds = int(shorthand_match.group(2))
+        return minutes * 60 + seconds
+
+    # Check for "X minutes" or "X minute" or "Xm" or "Xmn" without seconds
+    # Also handle French: "X minutes" with comma decimal
+    mins_only_match = re.match(r'^(\d+(?:[.,]\d+)?)\s*(?:minutes?|mins?|mn|m)$', duration_str)
+    if mins_only_match:
+        mins_str = mins_only_match.group(1).replace(',', '.')
+        return float(mins_str) * 60
+
+    # Check for "X seconds" or "Xs" or "X s" (with or without space)
+    secs_only_match = re.match(r'^(\d+(?:[.,]\d+)?)\s*(?:secondes?|seconds?|secs?|s)$', duration_str)
+    if secs_only_match:
+        secs_str = secs_only_match.group(1).replace(',', '.')
+        return float(secs_str)
+
+    # Replace French decimal comma with period for other numeric parsing
+    duration_str = duration_str.replace(',', '.')
+
+    # Remove common words (English and French)
     duration_str = duration_str.replace('seconds', '').replace('second', '')
+    duration_str = duration_str.replace('secondes', '').replace('seconde', '')
     duration_str = duration_str.replace('minutes', ':').replace('minute', ':')
     duration_str = duration_str.replace('mins', ':').replace('min', ':')
     duration_str = duration_str.replace('sec', '').replace('secs', '')
-    duration_str = duration_str.replace('and', '').strip()
+    duration_str = duration_str.replace('and', '').replace('et', '').strip()
 
     # Handle formats like 3'20" or 3'20
     duration_str = duration_str.replace("'", ':').replace('"', '')
