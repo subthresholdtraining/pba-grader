@@ -7,12 +7,109 @@ import re
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+# Import anthropic for LLM normalization (optional dependency)
+try:
+    from anthropic import Anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+
+
+def normalize_duration_with_llm(raw_answer: str, api_key: str) -> str:
+    """
+    Use Claude to normalize unusual duration formats to total seconds.
+
+    Handles formats like:
+    - "0:00:10" (HH:MM:SS meaning 10 seconds)
+    - "6.22" (European style meaning 6 min 22 sec)
+    - "5m 57 seconds" (mixed abbreviation and full word)
+
+    Args:
+        raw_answer: The raw duration string from student
+        api_key: Anthropic API key
+
+    Returns:
+        Normalized string (either seconds as number, "DOOR", or "INVALID")
+    """
+    if not raw_answer or not raw_answer.strip():
+        return raw_answer
+
+    if not api_key or not ANTHROPIC_AVAILABLE:
+        return raw_answer
+
+    # Skip if it's already a simple format that parse_duration handles well
+    raw_clean = raw_answer.strip().lower()
+
+    # Quick check: if it's clearly DOOR/DIAB, don't bother with LLM
+    if 'door' in raw_clean or 'diab' in raw_clean:
+        return raw_answer
+
+    # Quick check: if it's a simple number, skip LLM
+    if re.match(r'^\d+$', raw_clean):
+        return raw_answer
+
+    # Quick check: if it matches standard formats we handle well, skip LLM
+    # Standard MM:SS format
+    if re.match(r'^\d{1,2}:\d{2}$', raw_clean):
+        return raw_answer
+
+    # Standard "X minutes Y seconds" format
+    if re.match(r'^\d+\s*minutes?\s*\d*\s*seconds?$', raw_clean):
+        return raw_answer
+
+    # Use LLM for unusual formats
+    try:
+        client = Anthropic(api_key=api_key)
+
+        prompt = f"""Convert this duration to total seconds. Return ONLY a number, nothing else.
+If it says 'Door', 'DIAB', or similar, return 'DOOR'.
+If it's not a valid duration, return 'INVALID'.
+
+Examples:
+- "10" → "10"
+- "0:00:10" → "10"
+- "5m 57 seconds" → "357"
+- "6.22" (European for 6:22) → "382"
+- "5:30" → "330"
+- "2min30" → "150"
+- "1:30:00" (HH:MM:SS for 1.5 hours) → "5400"
+
+Input: {raw_answer}"""
+
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=50,
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+
+        result = message.content[0].text.strip()
+
+        # Validate the result
+        if result == "DOOR":
+            return "DOOR"
+        elif result == "INVALID":
+            return raw_answer  # Let parse_duration handle it
+        else:
+            # Try to parse as number to validate
+            try:
+                float(result)
+                return result  # Return the seconds as string
+            except ValueError:
+                return raw_answer  # Invalid response, use original
+
+    except Exception:
+        # On any error, fall back to original answer
+        return raw_answer
+
 @dataclass
 class GradeResult:
     """Result of grading a single question."""
     is_correct: bool
     feedback: str
     calculation: Optional[str] = None  # For showing percentage calculations
+    confidence: str = "high"  # "high" or "review" - review means near threshold, needs human check
 
 
 def parse_duration(duration_str: str) -> Optional[float]:
@@ -175,40 +272,58 @@ def grade_maisie_q1(answer: str) -> GradeResult:
             feedback="Maisie did show signs of anxiety early on, so well done! It is okay to err on the side of caution, especially when just starting out with a dog. However, for Plan 1 Maisie could have started with a target duration exercise rather than Door is a Bore."
         )
 
+    # Borderline zones: near 5 (DIAB threshold), near 10 (conservative threshold), near 20 (pass/fail)
+    confidence = "high"
+    if 4 <= duration <= 6:  # Near DIAB/target duration boundary
+        confidence = "review"
+    elif 9 <= duration <= 11:  # Near too-conservative boundary
+        confidence = "review"
+    elif 19 <= duration <= 22:  # Near pass/fail boundary at 20
+        confidence = "review"
+    elif 41 <= duration <= 45:  # Near slightly-pushy/too-pushy boundary
+        confidence = "review"
+
     if duration <= 4:
         return GradeResult(
             is_correct=False,
-            feedback="Maisie did show signs of anxiety early on, so well done! It is okay to err on the side of caution, especially when just starting out with a dog. However, for anything under 5 seconds we'd start a dog on DIAB and in Maisie's case she does not need to start on DIAB. Maisie was doing well for the first 19 seconds of the video."
+            feedback="Maisie did show signs of anxiety early on, so well done! It is okay to err on the side of caution, especially when just starting out with a dog. However, for anything under 5 seconds we'd start a dog on DIAB and in Maisie's case she does not need to start on DIAB. Maisie was doing well for the first 19 seconds of the video.",
+            confidence=confidence
         )
     elif duration <= 9:
         return GradeResult(
             is_correct=False,
-            feedback="Maisie was doing well for the first 19 seconds of the video. We start to see her struggle with those repeated yawns and lip licks starting at 20 seconds. It would have been okay to start her around 15 seconds to shave a little time off from those first signs of anxiety. However, it's always okay to err on the side of caution, especially when just starting out with a client."
+            feedback="Maisie was doing well for the first 19 seconds of the video. We start to see her struggle with those repeated yawns and lip licks starting at 20 seconds. It would have been okay to start her around 15 seconds to shave a little time off from those first signs of anxiety. However, it's always okay to err on the side of caution, especially when just starting out with a client.",
+            confidence=confidence
         )
     elif duration <= 16:
         return GradeResult(
             is_correct=True,
-            feedback="Excellent choice for Maisie's Plan 1. Maisie starts showing anxiety with repeated yawning and lip licking starting at 20 seconds. More signs of anxiety follow throughout the absence. You identified those early signs and set a safe target duration well before they appeared."
+            feedback="Excellent choice for Maisie's Plan 1. Maisie starts showing anxiety with repeated yawning and lip licking starting at 20 seconds. More signs of anxiety follow throughout the absence. You identified those early signs and set a safe target duration well before they appeared.",
+            confidence=confidence
         )
     elif duration <= 19:
         return GradeResult(
             is_correct=True,
-            feedback="Nice job catching that Maisie starts showing anxiety with repeated yawning and lip licking starting at 20 seconds. More signs of anxiety follow throughout the absence. Since this is your first time seeing Maisie you could even start closer to 15 seconds just to shave a little time off from where we saw those first signs of anxiety."
+            feedback="Nice job catching that Maisie starts showing anxiety with repeated yawning and lip licking starting at 20 seconds. More signs of anxiety follow throughout the absence. Since this is your first time seeing Maisie you could even start closer to 15 seconds just to shave a little time off from where we saw those first signs of anxiety.",
+            confidence=confidence
         )
     elif duration == 20:
         return GradeResult(
             is_correct=True,
-            feedback="Nice job catching that when Maisie started yawning and lip licking around 20 seconds she was beginning to go over threshold. After that more signs of anxiety followed through the absence. Since her first yawn is 20 seconds into the absence we'd want to start her first exercise slightly before those first signs of anxiety. Starting closer to 15 seconds would be a better choice for Maisie."
+            feedback="Nice job catching that when Maisie started yawning and lip licking around 20 seconds she was beginning to go over threshold. After that more signs of anxiety followed through the absence. Since her first yawn is 20 seconds into the absence we'd want to start her first exercise slightly before those first signs of anxiety. Starting closer to 15 seconds would be a better choice for Maisie.",
+            confidence=confidence
         )
     elif duration <= 43:
         return GradeResult(
             is_correct=False,
-            feedback="This target duration is slightly pushy. Maisie does start showing signs of anxiety pretty early on; repeated lip licks and yawns starting at 20 seconds, after which she gets up with a gruff, stretches, and looks at the door stiffly. Then she scratches and stretches. Some of these things could be okay on their own, but we are seeing an escalation of behaviors here. For Maisie, you'd want to set the target duration for Plan 1 to slightly before those very first signs of anxiety."
+            feedback="This target duration is slightly pushy. Maisie does start showing signs of anxiety pretty early on; repeated lip licks and yawns starting at 20 seconds, after which she gets up with a gruff, stretches, and looks at the door stiffly. Then she scratches and stretches. Some of these things could be okay on their own, but we are seeing an escalation of behaviors here. For Maisie, you'd want to set the target duration for Plan 1 to slightly before those very first signs of anxiety.",
+            confidence=confidence
         )
     else:
         return GradeResult(
             is_correct=False,
-            feedback="Take another look at the video for Maisie. She starts to show signs of anxiety pretty early on. Watch closely. For Maisie, you'd want to set the target duration for Plan 1 to something you're pretty certain she'll be comfortable doing - a duration that's shorter than where we see those first signs of anxiety. We are looking for less than 20 seconds."
+            feedback="Take another look at the video for Maisie. She starts to show signs of anxiety pretty early on. Watch closely. For Maisie, you'd want to set the target duration for Plan 1 to something you're pretty certain she'll be comfortable doing - a duration that's shorter than where we see those first signs of anxiety. We are looking for less than 20 seconds.",
+            confidence=confidence
         )
 
 
@@ -235,29 +350,42 @@ def grade_maisie_q2(answer: str, q1_answer: str) -> GradeResult:
 
     calc_str = f"Your Plan 1: {format_duration(old_duration)} -> Plan 2: {format_duration(new_duration)} = {increase_pct:.1f}% increase"
 
+    # Flag for review if within 2% of boundaries
+    confidence = "high"
+    if abs(increase_pct - min_pct) <= 2:  # Near lower boundary (10%)
+        confidence = "review"
+    elif abs(increase_pct - max_pct) <= 2:  # Near upper boundary (20%)
+        confidence = "review"
+    elif 20 < increase_pct <= 23:  # Just over the guideline
+        confidence = "review"
+
     if increase_pct < min_pct:
         return GradeResult(
             is_correct=False,
             feedback=f"Maisie would have been okay to push by the normal guidelines for under 2 minutes of 10-20%. This increase of {increase_pct:.1f}% is a bit conservative.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     elif increase_pct <= max_pct + 0.5:  # Small tolerance
         return GradeResult(
             is_correct=True,
             feedback=f"Well done on selecting a reasonable target increase for Plan 2! This is a {increase_pct:.1f}% increase, which is correctly following the guidelines for increases to target durations under 2 minutes.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     elif increase_pct <= 25:
         return GradeResult(
             is_correct=False,
             feedback=f"You were right to increase the target duration but this increase of {increase_pct:.1f}% is a little over the guidelines for durations under 2 minutes of 10-20%. When just starting out with a dog we'd be more likely to stay within those guidelines.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     else:
         return GradeResult(
             is_correct=False,
             feedback=f"The increases here are too high at {increase_pct:.1f}%. Please see the Plan Building Guidelines for target duration increases.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
 
 
@@ -284,29 +412,42 @@ def grade_maisie_q3(answer: str, q2_answer: str) -> GradeResult:
 
     calc_str = f"Your Plan 2: {format_duration(old_duration)} -> Plan 3: {format_duration(new_duration)} = {increase_pct:.1f}% increase"
 
+    # Flag for review if within 2% of boundaries
+    confidence = "high"
+    if abs(increase_pct - min_pct) <= 2:
+        confidence = "review"
+    elif abs(increase_pct - max_pct) <= 2:
+        confidence = "review"
+    elif 20 < increase_pct <= 23:
+        confidence = "review"
+
     if increase_pct < min_pct:
         return GradeResult(
             is_correct=False,
             feedback=f"Maisie would have been okay to push by the normal guidelines for under 2 minutes of 10-20%. This increase of {increase_pct:.1f}% is a bit conservative.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     elif increase_pct <= max_pct + 0.5:
         return GradeResult(
             is_correct=True,
             feedback=f"Well done on selecting another reasonable target increase for Plan 3! This is a {increase_pct:.1f}% increase, which is within the guidelines.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     elif increase_pct <= 25:
         return GradeResult(
             is_correct=False,
             feedback=f"You were right to increase the target duration but this increase of {increase_pct:.1f}% is a little over the guidelines for durations under 2 minutes of 10-20%.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     else:
         return GradeResult(
             is_correct=False,
             feedback=f"The increases here are too high at {increase_pct:.1f}%. Please see the Plan Building Guidelines for target duration increases.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
 
 
@@ -368,33 +509,49 @@ def grade_minna_q6(answer: str, q5_answer: str) -> GradeResult:
         q5_duration = parse_duration(q5_answer)
         if q5_duration and duration > 0:
             increase_pct = calculate_percentage_increase(q5_duration, duration)
+            # Flag for review if near percentage boundaries
+            confidence = "high"
+            if abs(increase_pct - 10) <= 2 or abs(increase_pct - 20) <= 2:
+                confidence = "review"
             if 10 <= increase_pct <= 20.5:
                 return GradeResult(
                     is_correct=True,
                     feedback=f"This is a {increase_pct:.1f}% increase from Plan 1, which follows the guidelines.",
-                    calculation=f"Plan 1: {format_duration(q5_duration)} -> Plan 2: {format_duration(duration)}"
+                    calculation=f"Plan 1: {format_duration(q5_duration)} -> Plan 2: {format_duration(duration)}",
+                    confidence=confidence
                 )
+
+    # Borderline zones for post-DIAB durations
+    confidence = "high"
+    if 2 <= duration <= 4:  # Near 3 sec boundary
+        confidence = "review"
+    elif 6 <= duration <= 8:  # Near 6-7 boundary
+        confidence = "review"
 
     # Standard grading for post-DIAB
     if duration < 3:
         return GradeResult(
             is_correct=False,
-            feedback="There is some trainer's choice once the dog has been able to do 1 sec in DIAB. Nice job not jumping up too high. We do recommend continuing with DIAB format for anything under 5 seconds. For instance, you'd repeat step 10 building up in 1sec increments to 5sec."
+            feedback="There is some trainer's choice once the dog has been able to do 1 sec in DIAB. Nice job not jumping up too high. We do recommend continuing with DIAB format for anything under 5 seconds. For instance, you'd repeat step 10 building up in 1sec increments to 5sec.",
+            confidence=confidence
         )
     elif duration <= 6:
         return GradeResult(
             is_correct=True,
-            feedback="Nice progression of increases following DIAB! There is some trainer's choice once the dog has been able to do 1 sec with the owner outside the door in DIAB."
+            feedback="Nice progression of increases following DIAB! There is some trainer's choice once the dog has been able to do 1 sec with the owner outside the door in DIAB.",
+            confidence=confidence
         )
     elif duration == 7:
         return GradeResult(
             is_correct=False,
-            feedback="There is some trainer's choice once the dog has been able to do 1 sec with the owner outside the door in DIAB. The first target duration exercise after DIAB would typically start at 5 sec. If you built up to 5sec in DIAB format, you might get away with 7 sec but we don't want to push our luck."
+            feedback="There is some trainer's choice once the dog has been able to do 1 sec with the owner outside the door in DIAB. The first target duration exercise after DIAB would typically start at 5 sec. If you built up to 5sec in DIAB format, you might get away with 7 sec but we don't want to push our luck.",
+            confidence=confidence
         )
     else:
         return GradeResult(
             is_correct=False,
-            feedback="There is some trainer's choice once the dog has been able to do 1 sec with the owner outside the door in DIAB. You can repeat step 10 building up in 1sec increments to 5sec or try 3sec then switch to a target duration. Either way, this would be too big of a jump for Plan 2."
+            feedback="There is some trainer's choice once the dog has been able to do 1 sec with the owner outside the door in DIAB. You can repeat step 10 building up in 1sec increments to 5sec or try 3sec then switch to a target duration. Either way, this would be too big of a jump for Plan 2.",
+            confidence=confidence
         )
 
 
@@ -405,20 +562,28 @@ def grade_minna_q7(answer: str, q6_answer: str) -> GradeResult:
 
     # If Q6 was DIAB, then Q7 should be 5-6 seconds
     if old_duration is None:
+        # Borderline near 5 sec boundary
+        confidence = "high"
+        if new_duration and 4 <= new_duration <= 7:
+            confidence = "review"
+
         if new_duration and 5 <= new_duration <= 6:
             return GradeResult(
                 is_correct=True,
-                feedback="Nice increase from DIAB to Plan 3. For this assignment, we were assuming Minna completed DIAB in Plan 1."
+                feedback="Nice increase from DIAB to Plan 3. For this assignment, we were assuming Minna completed DIAB in Plan 1.",
+                confidence=confidence
             )
         elif new_duration and new_duration < 5:
             return GradeResult(
                 is_correct=False,
-                feedback="We recommend continuing with DIAB format for anything under 5 seconds."
+                feedback="We recommend continuing with DIAB format for anything under 5 seconds.",
+                confidence=confidence
             )
         else:
             return GradeResult(
                 is_correct=False,
-                feedback="This is too big of a jump after DIAB."
+                feedback="This is too big of a jump after DIAB.",
+                confidence=confidence
             )
 
     if new_duration is None:
@@ -438,32 +603,44 @@ def grade_minna_q7(answer: str, q6_answer: str) -> GradeResult:
 
     calc_str = f"Your Plan 2: {format_duration(old_duration)} -> Plan 3: {format_duration(new_duration)} = {increase_pct:.1f}% increase"
 
+    # Flag for review if near percentage boundaries
+    confidence = "high"
+    if abs(increase_pct - min_pct) <= 2 or abs(increase_pct - max_pct) <= 2:
+        confidence = "review"
+
     # For very short durations, be more lenient since small absolute changes = big percentages
     if old_duration <= 6:
+        # Near 8 sec boundary for short durations
+        if 7 <= new_duration <= 9:
+            confidence = "review"
         if new_duration <= 8:
             return GradeResult(
                 is_correct=True,
                 feedback="Nice job selecting an appropriate increase for Plan 3. For such short durations, small absolute increases are appropriate.",
-                calculation=calc_str
+                calculation=calc_str,
+                confidence=confidence
             )
 
     if increase_pct < min_pct - 2:  # Some tolerance for short durations
         return GradeResult(
             is_correct=False,
             feedback=f"This increase of {increase_pct:.1f}% is a bit conservative.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     elif increase_pct <= max_pct + 5:  # More tolerance for short durations
         return GradeResult(
             is_correct=True,
             feedback=f"Nice job selecting an appropriate increase for Plan 3.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     else:
         return GradeResult(
             is_correct=False,
             feedback=f"You selected quite a jump from Plan 2 at {increase_pct:.1f}%. This might be more than Minna can cope with.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
 
 
@@ -531,40 +708,54 @@ def grade_oliver_q9(answer: str) -> GradeResult:
     # Convert to minutes for easier comparison
     minutes = duration / 60
 
+    # Borderline zones (in minutes): near 4 min, near 6.15 min
+    confidence = "high"
+    if 3.75 <= minutes <= 4.25:  # Near 4 minute boundary
+        confidence = "review"
+    elif 5.9 <= minutes <= 6.3:  # Near upper boundary
+        confidence = "review"
+
     if minutes < 1:
         return GradeResult(
             is_correct=False,
-            feedback="It's okay for dogs to move around and to walk to the door to watch. This game of going and coming is different, so we will often see this, especially in earlier stages of training even when dogs are not upset. Oliver settled and looked pretty relaxed; He walks toward the door at a normal pace (not frantic), turns his head and moves a bit when he's at the door (so he's not frozen), has alert but soft eyes and soft mouth, and he sits. All that said, Oliver did well here, so what would a good target duration be to start him on?"
+            feedback="It's okay for dogs to move around and to walk to the door to watch. This game of going and coming is different, so we will often see this, especially in earlier stages of training even when dogs are not upset. Oliver settled and looked pretty relaxed; He walks toward the door at a normal pace (not frantic), turns his head and moves a bit when he's at the door (so he's not frozen), has alert but soft eyes and soft mouth, and he sits. All that said, Oliver did well here, so what would a good target duration be to start him on?",
+            confidence=confidence
         )
     elif minutes < 4:
         return GradeResult(
             is_correct=False,
-            feedback="It's okay for dogs to move around and to walk to the door to watch. This game of going and coming is different, so we will often see this, especially in earlier stages of training even when dogs are not upset. Oliver settled and looked pretty relaxed. His Plan 1 target duration could have been closer to the 5-minute range. Take another look at the video."
+            feedback="It's okay for dogs to move around and to walk to the door to watch. This game of going and coming is different, so we will often see this, especially in earlier stages of training even when dogs are not upset. Oliver settled and looked pretty relaxed. His Plan 1 target duration could have been closer to the 5-minute range. Take another look at the video.",
+            confidence=confidence
         )
     elif minutes < 4.75:
         return GradeResult(
             is_correct=True,
-            feedback="It's okay for dogs to move around and to walk to the door to watch. Oliver settled and looked pretty relaxed. His Plan 1 target duration could have been closer to the 5-minute range, but it's best to err on the side of caution!"
+            feedback="It's okay for dogs to move around and to walk to the door to watch. Oliver settled and looked pretty relaxed. His Plan 1 target duration could have been closer to the 5-minute range, but it's best to err on the side of caution!",
+            confidence=confidence
         )
     elif minutes <= 5.5:
         return GradeResult(
             is_correct=True,
-            feedback="Well done recognizing that Oliver did well for the duration of this exercise! It's okay for dogs to move around and go to the door, as long as there aren't signs of anxiety. You chose an excellent starting duration for Plan 1."
+            feedback="Well done recognizing that Oliver did well for the duration of this exercise! It's okay for dogs to move around and go to the door, as long as there aren't signs of anxiety. You chose an excellent starting duration for Plan 1.",
+            confidence=confidence
         )
     elif minutes <= 6.15:
         return GradeResult(
             is_correct=True,
-            feedback="Well done recognizing that Oliver did well for the duration of this exercise! It's okay for dogs to move around and go to the door, as long as there aren't signs of anxiety. Since this is an assessment, it was smart that you chose to shave some time off for the first exercise, just in case this happened to be a really good day for Oliver."
+            feedback="Well done recognizing that Oliver did well for the duration of this exercise! It's okay for dogs to move around and go to the door, as long as there aren't signs of anxiety. Since this is an assessment, it was smart that you chose to shave some time off for the first exercise, just in case this happened to be a really good day for Oliver.",
+            confidence=confidence
         )
     elif minutes <= 6.25:
         return GradeResult(
             is_correct=False,
-            feedback="Well done recognizing that Oliver did well for the duration of this exercise! It's okay for dogs to move around and go to the door, as long as there aren't signs of anxiety. The starting target is a little high though with a push over 10% when just starting with Oliver and if this was an assessment, it would be a good idea to shave some time off for the first exercise instead of push."
+            feedback="Well done recognizing that Oliver did well for the duration of this exercise! It's okay for dogs to move around and go to the door, as long as there aren't signs of anxiety. The starting target is a little high though with a push over 10% when just starting with Oliver and if this was an assessment, it would be a good idea to shave some time off for the first exercise instead of push.",
+            confidence=confidence
         )
     else:
         return GradeResult(
             is_correct=False,
-            feedback="Well done recognizing that Oliver did well for the duration of this exercise! However, the duration increase from the video is too high and since you are just starting with Oliver, it would be better to shave some time off for the first exercise, just in case this happened to be a really good day for Oliver."
+            feedback="Well done recognizing that Oliver did well for the duration of this exercise! However, the duration increase from the video is too high and since you are just starting with Oliver, it would be better to shave some time off for the first exercise, just in case this happened to be a really good day for Oliver.",
+            confidence=confidence
         )
 
 
@@ -589,30 +780,43 @@ def grade_oliver_q10(answer: str, q9_answer: str) -> GradeResult:
     increase_pct = calculate_percentage_increase(old_duration, new_duration)
     calc_str = f"Your Plan 1: {format_duration(old_duration)} -> Plan 2: {format_duration(new_duration)} = {increase_pct:.1f}% increase"
 
+    # Flag for review if within 2% of boundaries (5% or 10%)
+    confidence = "high"
+    if abs(increase_pct - 5) <= 2:  # Near lower boundary
+        confidence = "review"
+    elif abs(increase_pct - 10) <= 2:  # Near upper boundary
+        confidence = "review"
+    elif 10 < increase_pct <= 13:  # Just over the guideline
+        confidence = "review"
+
     # Oliver is over 2 minutes, so 5-10% guideline
     if increase_pct < 4:
         return GradeResult(
             is_correct=False,
             feedback=f"It would have been okay to follow the guidelines here and push by 5-10% for Plan 2. This {increase_pct:.1f}% increase is a bit conservative.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     elif increase_pct <= 10.5:  # Small tolerance
         return GradeResult(
             is_correct=True,
             feedback=f"Excellent progress of duration to Plan 2! This is a {increase_pct:.1f}% increase from Oliver's Plan 1 target duration, which is correctly following the guidelines for increases to target durations over 2 minutes.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     elif increase_pct <= 15:
         return GradeResult(
             is_correct=False,
             feedback=f"The increase from Plan 1 to Plan 2 is a tad higher than the guideline of 5-10% for durations over 2 min at {increase_pct:.1f}%. When just starting out with a dog we'd be more likely to stay within those guidelines.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     else:
         return GradeResult(
             is_correct=False,
             feedback=f"The increase to Plan 2 is too high at {increase_pct:.1f}%. Please see the Plan Building Guidelines as a refresher.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
 
 
@@ -636,21 +840,30 @@ def grade_oliver_q11(answer: str, q9_answer: str, q10_answer: str) -> GradeResul
 
     # Should drop back to Q9 answer
     if q9_duration:
+        # Borderline: near the 5 second tolerance boundary
+        confidence = "high"
+        diff = abs(new_duration - q9_duration)
+        if 3 <= diff <= 8:  # Near the tolerance boundary
+            confidence = "review"
+
         # Allow some tolerance (within 5 seconds)
-        if abs(new_duration - q9_duration) <= 5:
+        if diff <= 5:
             return GradeResult(
                 is_correct=True,
-                feedback="Excellent job dropping back to the target duration from the last successful exercise when Oliver struggled! This is the rule of thumb for a first drop."
+                feedback="Excellent job dropping back to the target duration from the last successful exercise when Oliver struggled! This is the rule of thumb for a first drop.",
+                confidence=confidence
             )
         elif new_duration < q9_duration:
             return GradeResult(
                 is_correct=False,
-                feedback=f"Great job selecting a drop here. But what should we be aiming to drop back to on the first drop? The rule of thumb is to go back to the last successful target duration, which was {format_duration(q9_duration)}."
+                feedback=f"Great job selecting a drop here. But what should we be aiming to drop back to on the first drop? The rule of thumb is to go back to the last successful target duration, which was {format_duration(q9_duration)}.",
+                confidence=confidence
             )
         else:
             return GradeResult(
                 is_correct=False,
-                feedback="This is not correctly following the protocol for a dog's first drop. When a dog struggles, we drop back to the last successful target duration."
+                feedback="This is not correctly following the protocol for a dog's first drop. When a dog struggles, we drop back to the last successful target duration.",
+                confidence=confidence
             )
 
     return GradeResult(
@@ -707,45 +920,60 @@ def grade_bella_q13(answer: str) -> GradeResult:
 
     minutes = duration / 60
 
+    # Borderline zones: near 2:30 (150 sec), near 3:10 (190 sec)
+    confidence = "high"
+    if 2.4 <= minutes <= 2.7:  # Near 2:30-2:40 boundary
+        confidence = "review"
+    elif 3.05 <= minutes <= 3.25:  # Near 3:10 boundary
+        confidence = "review"
+
     if minutes < 1.5:
         return GradeResult(
             is_correct=False,
-            feedback="Bella actually does well for a good portion of the absence, she is watching the door and alert, but the rest of her body language is pretty relaxed. She does turn her head at the 1:26 min mark in the video, we will see dogs move around when training which can be normal. Take another peek at the video. Do you see where Bella goes from alert but settled to starting to become anxious? We want to set our first target duration to just before those first signs of anxiety start."
+            feedback="Bella actually does well for a good portion of the absence, she is watching the door and alert, but the rest of her body language is pretty relaxed. She does turn her head at the 1:26 min mark in the video, we will see dogs move around when training which can be normal. Take another peek at the video. Do you see where Bella goes from alert but settled to starting to become anxious? We want to set our first target duration to just before those first signs of anxiety start.",
+            confidence=confidence
         )
     elif minutes < 2.5:
         return GradeResult(
             is_correct=False,
-            feedback="Bella actually does well for a good portion of the absence. At the 3:14 timestamp, she goes off camera, whines, and comes back. This is followed by escalating signs of anxiety through the remainder of the absence. A target duration just slightly less than 3 minutes would have been a good choice for Bella, but it is always better to err on the side of caution, especially when just starting out with a dog."
+            feedback="Bella actually does well for a good portion of the absence. At the 3:14 timestamp, she goes off camera, whines, and comes back. This is followed by escalating signs of anxiety through the remainder of the absence. A target duration just slightly less than 3 minutes would have been a good choice for Bella, but it is always better to err on the side of caution, especially when just starting out with a dog.",
+            confidence=confidence
         )
     elif minutes < 2.67:  # 2:40
         return GradeResult(
             is_correct=True,
-            feedback="Excellent job spotting where Bella started to get anxious around the 3-minute time stamp. Good call to shave some time off for her first target duration to be safe. The amount we choose to shave off can vary based on different factors."
+            feedback="Excellent job spotting where Bella started to get anxious around the 3-minute time stamp. Good call to shave some time off for her first target duration to be safe. The amount we choose to shave off can vary based on different factors.",
+            confidence=confidence
         )
     elif minutes <= 3.07:  # Up to 3:04
         return GradeResult(
             is_correct=True,
-            feedback="Great starting target for Plan 1 since after Bella quickly trots off and whines more signs of anxiety follow."
+            feedback="Great starting target for Plan 1 since after Bella quickly trots off and whines more signs of anxiety follow.",
+            confidence=confidence
         )
     elif minutes <= 3.15:  # 3:05-3:09
         return GradeResult(
             is_correct=True,
-            feedback="Good job noticing that after Bella whines she escalates with more signs of anxiety. You might even want to start closer to 3 minutes or slightly before since after Bella quickly trots off more signs of anxiety follow."
+            feedback="Good job noticing that after Bella whines she escalates with more signs of anxiety. You might even want to start closer to 3 minutes or slightly before since after Bella quickly trots off more signs of anxiety follow.",
+            confidence=confidence
         )
     elif minutes <= 3.17:  # 3:10
         return GradeResult(
             is_correct=True,
-            feedback="Good job noticing that after Bella whines she escalates with more signs of anxiety. Since she whines 3:10 into the absence we'd want to start her first exercise before those first signs of anxiety. Starting closer to 3 minutes or a little before to shave some time off would be a better choice for Bella."
+            feedback="Good job noticing that after Bella whines she escalates with more signs of anxiety. Since she whines 3:10 into the absence we'd want to start her first exercise before those first signs of anxiety. Starting closer to 3 minutes or a little before to shave some time off would be a better choice for Bella.",
+            confidence=confidence
         )
     elif minutes <= 3.4:  # Up to 3:24
         return GradeResult(
             is_correct=False,
-            feedback="Bella started to show first signs of stress before this duration. Remember, we want to go off total absence time, not the time stamp, and the owner left 14 seconds into the video. You'd want to select a target duration for Plan 1 that is slightly shorter than when Bella started to show those first signs of anxiety."
+            feedback="Bella started to show first signs of stress before this duration. Remember, we want to go off total absence time, not the time stamp, and the owner left 14 seconds into the video. You'd want to select a target duration for Plan 1 that is slightly shorter than when Bella started to show those first signs of anxiety.",
+            confidence=confidence
         )
     else:
         return GradeResult(
             is_correct=False,
-            feedback="Take another look at Bella's video. Do you see or hear any signs of stress, and if so, how long into the absence do they begin? You'd want to select a target duration for Plan 1 that is slightly shorter than that, shaving off some time to play it safe."
+            feedback="Take another look at Bella's video. Do you see or hear any signs of stress, and if so, how long into the absence do they begin? You'd want to select a target duration for Plan 1 that is slightly shorter than that, shaving off some time to play it safe.",
+            confidence=confidence
         )
 
 
@@ -828,29 +1056,42 @@ def grade_bella_q14(answer: str, q13_answer: str) -> GradeResult:
 
     calc_str = f"Your Plan 1: {format_duration(old_duration)} -> Plan 2: {format_duration(new_duration)} = {increase_pct:.1f}% increase"
 
+    # Flag for review if within 2% of boundaries
+    confidence = "high"
+    if abs(increase_pct - min_pct) <= 2:
+        confidence = "review"
+    elif abs(increase_pct - max_pct) <= 2:
+        confidence = "review"
+    elif max_pct < increase_pct <= max_pct + 3:  # Just over the guideline
+        confidence = "review"
+
     if increase_pct < min_pct - 1:
         return GradeResult(
             is_correct=False,
             feedback=f"This increase of {increase_pct:.1f}% is below the recommended guidelines for increases to target durations {'under' if old_duration < 120 else 'over'} 2 minutes.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     elif increase_pct <= max_pct + 0.5:
         return GradeResult(
             is_correct=True,
             feedback=f"Nice progression of duration to Plan 2! Even though Bella wobbled on the warmups in Plan 1 she aced the target so good call to increase the target for Plan 2.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     elif increase_pct <= max_pct + 3:
         return GradeResult(
             is_correct=False,
             feedback=f"The increase from Plan 1 to Plan 2 at {increase_pct:.1f}% is a tad higher than the guideline of {int(min_pct)}-{int(max_pct)}% for durations {'under' if old_duration < 120 else 'over'} 2 min. When just starting out with a dog we'd be more likely to stay within those guidelines.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     else:
         return GradeResult(
             is_correct=False,
             feedback=f"This is a bit too high of an increase from Plan 1 at {increase_pct:.1f}%.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
 
 
@@ -924,23 +1165,35 @@ def grade_bella_q15(answer: str, q14_answer: str) -> GradeResult:
 
     calc_str = f"Your Plan 2: {format_duration(old_duration)} -> Plan 3: {format_duration(new_duration)} = {increase_pct:.1f}% increase"
 
+    # Flag for review if within 2% of boundaries
+    confidence = "high"
+    if abs(increase_pct - min_pct) <= 2:
+        confidence = "review"
+    elif abs(increase_pct - max_pct) <= 2:
+        confidence = "review"
+    elif max_pct < increase_pct <= max_pct + 3:  # Just over the guideline
+        confidence = "review"
+
     if increase_pct < min_pct - 1:
         return GradeResult(
             is_correct=False,
             feedback=f"This increase of {increase_pct:.1f}% is below the recommended guidelines for increases to target durations {'under' if old_duration < 120 else 'over'} 2 minutes.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     elif increase_pct <= max_pct + 0.5:
         return GradeResult(
             is_correct=True,
             feedback=f"This is a {increase_pct:.1f}% increase from Bella's Plan 2, which is within the guidelines for durations {'under' if old_duration < 120 else 'over'} 2 min.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
     else:
         return GradeResult(
             is_correct=False,
             feedback=f"This is a bit too high of an increase from what you set Bella's Plan 2 target duration at {increase_pct:.1f}%.",
-            calculation=calc_str
+            calculation=calc_str,
+            confidence=confidence
         )
 
 
@@ -1094,42 +1347,54 @@ def grade_diab_q17(answer: str) -> GradeResult:
 # MAIN GRADING FUNCTION
 # =============================================================================
 
-def grade_submission(answers: dict) -> dict:
+def grade_submission(answers: dict, api_key: str = None) -> dict:
     """
     Grade a complete submission.
 
     Args:
         answers: Dictionary with keys like 'q1', 'q2', etc. containing student answers
+        api_key: Optional Anthropic API key for LLM-based duration normalization
 
     Returns:
         Dictionary with grading results for each question
     """
     results = {}
 
+    # Duration questions that need LLM normalization: Q1-3, Q5-7, Q9-11, Q13-15
+    duration_questions = ['q1', 'q2', 'q3', 'q5', 'q6', 'q7', 'q9', 'q10', 'q11', 'q13', 'q14', 'q15']
+
+    # Normalize duration answers using LLM if API key is provided
+    normalized_answers = answers.copy()
+    if api_key:
+        for q_id in duration_questions:
+            raw_answer = answers.get(q_id, '')
+            if raw_answer:
+                normalized_answers[q_id] = normalize_duration_with_llm(raw_answer, api_key)
+
     # Maisie
-    results['q1'] = grade_maisie_q1(answers.get('q1', ''))
-    results['q2'] = grade_maisie_q2(answers.get('q2', ''), answers.get('q1', ''))
-    results['q3'] = grade_maisie_q3(answers.get('q3', ''), answers.get('q2', ''))
+    results['q1'] = grade_maisie_q1(normalized_answers.get('q1', ''))
+    results['q2'] = grade_maisie_q2(normalized_answers.get('q2', ''), normalized_answers.get('q1', ''))
+    results['q3'] = grade_maisie_q3(normalized_answers.get('q3', ''), normalized_answers.get('q2', ''))
     results['q4'] = grade_maisie_q4(answers.get('q4', ''))
 
     # Minna
-    results['q5'] = grade_minna_q5(answers.get('q5', ''))
-    results['q6'] = grade_minna_q6(answers.get('q6', ''), answers.get('q5', ''))
-    results['q7'] = grade_minna_q7(answers.get('q7', ''), answers.get('q6', ''))
+    results['q5'] = grade_minna_q5(normalized_answers.get('q5', ''))
+    results['q6'] = grade_minna_q6(normalized_answers.get('q6', ''), normalized_answers.get('q5', ''))
+    results['q7'] = grade_minna_q7(normalized_answers.get('q7', ''), normalized_answers.get('q6', ''))
     results['q8'] = grade_minna_q8(answers.get('q8', ''))
 
     # Oliver
-    results['q9'] = grade_oliver_q9(answers.get('q9', ''))
-    results['q10'] = grade_oliver_q10(answers.get('q10', ''), answers.get('q9', ''))
-    results['q11'] = grade_oliver_q11(answers.get('q11', ''), answers.get('q9', ''), answers.get('q10', ''))
+    results['q9'] = grade_oliver_q9(normalized_answers.get('q9', ''))
+    results['q10'] = grade_oliver_q10(normalized_answers.get('q10', ''), normalized_answers.get('q9', ''))
+    results['q11'] = grade_oliver_q11(normalized_answers.get('q11', ''), normalized_answers.get('q9', ''), normalized_answers.get('q10', ''))
     results['q12'] = grade_oliver_q12(answers.get('q12', ''))
 
     # Bella
-    results['q13'] = grade_bella_q13(answers.get('q13', ''))
-    results['q13b'] = grade_bella_q13b(answers.get('q13b', ''), answers.get('q13', ''))
-    results['q14'] = grade_bella_q14(answers.get('q14', ''), answers.get('q13', ''))
+    results['q13'] = grade_bella_q13(normalized_answers.get('q13', ''))
+    results['q13b'] = grade_bella_q13b(answers.get('q13b', ''), normalized_answers.get('q13', ''))
+    results['q14'] = grade_bella_q14(normalized_answers.get('q14', ''), normalized_answers.get('q13', ''))
     results['q14b'] = grade_bella_q14b(answers.get('q14b', ''), answers.get('q13b', ''))
-    results['q15'] = grade_bella_q15(answers.get('q15', ''), answers.get('q14', ''))
+    results['q15'] = grade_bella_q15(normalized_answers.get('q15', ''), normalized_answers.get('q14', ''))
     results['q15b'] = grade_bella_q15b(answers.get('q15b', ''), answers.get('q14b', ''))
     results['q16'] = grade_bella_q16(answers.get('q16', ''))
 

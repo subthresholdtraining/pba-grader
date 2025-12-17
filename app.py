@@ -413,9 +413,9 @@ if st.session_state.get('sheet_loaded', False) and 'sheet_data' in st.session_st
             # Grade button
             st.markdown("---")
             if st.button("📝 Grade Submission", type="primary", use_container_width=True):
-                # Grade
+                # Grade (pass API key for LLM-based duration normalization)
                 with st.spinner("Grading submission..."):
-                    results = grade_submission(answers)
+                    results = grade_submission(answers, api_key=api_key)
                     overall_grade, resubmit_questions = determine_overall_grade(results)
 
                 # Store results in session state
@@ -458,7 +458,11 @@ if st.session_state.get('sheet_loaded', False) and 'sheet_data' in st.session_st
                             answer = answers.get(q_id, "")
 
                             status = "✅" if result.is_correct else "❌"
-                            st.markdown(f"**{question_labels.get(q_id, q_id)}** {status}")
+                            # Add review flag if confidence is low
+                            review_flag = " ⚠️" if getattr(result, 'confidence', 'high') == "review" else ""
+                            st.markdown(f"**{question_labels.get(q_id, q_id)}** {status}{review_flag}")
+                            if review_flag:
+                                st.caption("*Borderline answer - please double-check*")
                             st.markdown(f"*Answer:* {answer if answer else '(no answer)'}")
 
                             if result.calculation:
